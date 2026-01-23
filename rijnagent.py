@@ -9,8 +9,8 @@ import os
 # CONFIG
 # ------------------------------------------
 
-TWILIO_SID = ""
-TWILIO_AUTH = ""
+TWILIO_SID = "${{ secrets.TWILIO_ACCOUNT_SID }}"
+TWILIO_AUTH = "${{ secrets.TWILIO_AUTH_TOKEN }}"
 TWILIO_WHATSAPP = "whatsapp:+14155238886"
 YOUR_WHATSAPP = "whatsapp:+31646260683"
 
@@ -224,3 +224,4 @@ if __name__ == "__main__":
     send_whatsapp(message)
 
     print("WhatsApp-bericht verzonden.")
+
