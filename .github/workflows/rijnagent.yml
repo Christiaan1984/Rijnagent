@@ -23,7 +23,7 @@ jobs:
 
       - name: Dependencies installeren
         run: |
-          pip install requests twilio
+          pip install requests twilio matplotlib
 
       # Mag falen bij eerste run
       - name: Vorige trenddata ophalen (artifact)
