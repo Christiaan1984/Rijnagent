@@ -159,4 +159,4 @@ if __name__ == "__main__":
 
     print("✅ Tekstbericht verzonden")
     print("📁 Grafieken gegenereerd in ./graphs/")
-``
+
