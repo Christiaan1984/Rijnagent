@@ -39,7 +39,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Christiaan1984/rijnagent-media
-          token: ${{ secrets.GITHUB_TOKEN }}
           path: media
 
       - name: Kopieer grafieken naar media-repo
@@ -65,7 +64,7 @@ jobs:
           TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
           FROM: "whatsapp:+14155238886"
           TO: "whatsapp:+31646260683"
-          BASE: "https://raw.githubusercontent.com/Christiaan1984/rijnagent-media/main"
+          BASE: "https://raw.githubusercontent.com/Christiaan1984/rijnagent-media/master"
         run: |
           curl -X POST https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json \
           -u "$TWILIO_SID:$TWILIO_AUTH" \
