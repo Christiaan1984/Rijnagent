@@ -104,55 +104,30 @@ def get_waterlevel_timeseries_uuid(station_uuid: str) -> str | None:
                 return ts_uuid
     return None
 
+from datetime import timedelta  # bovenin staat dit waarschijnlijk al geïmporteerd
+
 def fetch_history(station_uuid: str, hours: int):
     """
-    Haalt betrouwbare historische waterstanden (cm) op voor de afgelopen X uur.
+    Haalt de waterstands-metingen (W) van de afgelopen 'hours' uren op
+    via de officiële PEGELONLINE endpoint:
+      /stations/{station_uuid}/W/measurements.json
+    We gebruiken hier start=P2D om 2 dagen historie op te halen.
+    Documentatie: https://www.wasserstaende.de/webservice/dokuRestapi
     """
-    # 1) haal station + alle tijdreeksen op
-    r = requests.get(
-        f"{BASE}/stations/{station_uuid}.json?includeTimeseries=true",
-        timeout=30
-    )
-    r.raise_for_status()
-    station = r.json()
 
-    # 2) kies expliciet de waterstand-reeks
-    ts_uuid = None
-    for ts in station.get("timeseries", []):
-        unit = (ts.get("unit") or "").lower()
-        name = ((ts.get("longname") or "") + (ts.get("shortname") or "")).lower()
+    # Gebruik een ISO-8601 periode i.p.v. absolute tijden:
+    # P2D = laatste 2 dagen (48 uur); dit dekt jouw use-case precies.
+    # Je kunt eventueel dynamisch afleiden uit 'hours', maar P2D is duidelijk en robuust.
+    url = f"{BASE}/stations/{station_uuid}/W/measurements.json?start=P2D"
 
-        if unit == "cm" and ("wasser" in name or ts.get("shortname") == "W"):
-            ts_uuid = ts.get("uuid")
-            break
-
-    if not ts_uuid:
-        print("[WARN] Geen waterstand-timeseries gevonden")
-        return []
-
-    # 3) tijdvenster
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(hours=hours)
-
-    params = {
-        "start": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "end": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "pageSize": 2000,
-        "includeIncomplete": "true"
-    }
-
-    # 4) measurements ophalen
-    r = requests.get(
-        f"{BASE}/timeseries/{ts_uuid}/measurements.json",
-        params=params,
-        timeout=45
-    )
+    r = requests.get(url, timeout=45)
     r.raise_for_status()
     measurements = r.json() or []
 
     points = []
     for m in measurements:
         try:
+            # JSON: {"timestamp":"2026-01-21T04:00:00+01:00", "value": "312", ...}
             t = datetime.fromisoformat(m["timestamp"].replace("Z", "+00:00")).timestamp()
             v = float(m["value"])
             points.append((t, v))
@@ -160,7 +135,15 @@ def fetch_history(station_uuid: str, hours: int):
             continue
 
     points.sort(key=lambda x: x[0])
-    print(f"[DEBUG] Historiepunten opgehaald: {len(points)}")
+
+    # Debug-logging in Actions: aantal punten + eerste/laatste tijdstempel
+    if points:
+        ts_first = datetime.fromtimestamp(points[0][0]).astimezone().strftime("%d-%m %H:%M")
+        ts_last  = datetime.fromtimestamp(points[-1][0]).astimezone().strftime("%d-%m %H:%M")
+        print(f"[DEBUG] Historie {station_uuid}: {len(points)} punten, van {ts_first} t/m {ts_last}")
+    else:
+        print(f"[DEBUG] Historie {station_uuid}: GEEN punten ontvangen")
+
     return points
 
 # =========================================================
@@ -235,5 +218,6 @@ if __name__ == "__main__":
 
     print("✅ Tekstbericht verzonden")
     print("📁 Grafieken gegenereerd in ./graphs/")
+
 
 
