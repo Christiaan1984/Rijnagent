@@ -1,223 +1,152 @@
 
-import os
-import requests
-import matplotlib.pyplot as plt
-from datetime import datetime, timezone, timedelta
-from twilio.rest import Client
+name: Rijn Waterstanden Agent (TEST)
 
-# =========================================================
-# CONFIG
-# =========================================================
+on:
+  schedule:
+    # TEST: elke 7 minuten om te bewijzen dat 'schedule' triggert
+    - cron: "*/7 * * * *"
+  workflow_dispatch:
 
-TWILIO_SID = os.getenv("TWILIO_SID")
-TWILIO_AUTH = os.getenv("TWILIO_AUTH")
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
 
-TWILIO_WHATSAPP = "whatsapp:+14155238886"   # Twilio Sandbox
-YOUR_WHATSAPP = "whatsapp:+31646260683"     # Jouw nummer
+    steps:
+      # PROOF: log waardoor deze run is gestart
+      - name: PROOF - is dit een scheduled run?
+        run: echo "Triggered by: $GITHUB_EVENT_NAME at $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
-# PEGELONLINE v2 (officiële WSV API)
-BASE = "https://www.wasserstaende.de/webservices/rest-api/v2"
+      # 1) Hoofdrepo uitchecken
+      - name: Checkout hoofd-repo
+        uses: actions/checkout@v4
 
-# Officiële station-UUID's
-STATIONS = {
-    "BONN": "593647aa-9fea-43ec-a7d6-6476a76ae868",
-    "KÖLN": "a6ee8177-107b-47dd-bcfd-30960ccc6e9c",
-    "DÜSSELDORF": "8f7e5f92-1153-4f93-acba-ca48670c8ca9",
-}
+      # 2) Python en dependencies
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-HOURS_BACK = 48
-GRAPH_DIR = "graphs"
+      - name: Installeer dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests twilio matplotlib
 
-# =========================================================
-# TWILIO
-# =========================================================
+      # 3) Debug voor script
+      - name: Debug voor script
+        shell: bash
+        run: |
+          echo "PWD="; pwd
+          echo "--- ls -la . ---"; ls -la .
+          echo "--- ls -la graphs (verwacht: bestaat nog niet) ---"
+          ls -la graphs || true
 
-def send_whatsapp_text(text: str):
-    if not TWILIO_SID or not TWILIO_AUTH:
-        raise RuntimeError("TWILIO_SID/TWILIO_AUTH ontbreken (Secrets/Env).")
-    client = Client(TWILIO_SID, TWILIO_AUTH)
-    client.messages.create(body=text, from_=TWILIO_WHATSAPP, to=YOUR_WHATSAPP)
+      # 4) Draai agent (maakt tekst + PNG's)
+      - name: Agent uitvoeren (tekst en grafieken genereren)
+        env:
+          TWILIO_SID: ${{ secrets.TWILIO_SID }}
+          TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
+        run: |
+          python rijnagent.py
 
-# =========================================================
-# UTILITIES
-# =========================================================
+      # 5) Debug na script
+      - name: Debug na script
+        shell: bash
+        run: |
+          echo "--- ls -la graphs (verwacht: nu .png's) ---"
+          ls -la graphs || true
 
-def ensure_graph_dir():
-    if not os.path.exists(GRAPH_DIR):
-        os.makedirs(GRAPH_DIR)
+      # 6) Media-repo uitchecken (PUBLIC) op branch main - met PAT: MEDIA_TOKEN
+      - name: Checkout media-repo
+        uses: actions/checkout@v4
+        with:
+          repository: Christiaan1984/rijnagent-media
+          ref: main
+          token: ${{ secrets.MEDIA_TOKEN }}
+          path: media
 
+      # (Optioneel) init-fallback: alleen als media-repo leeg is
+      - name: Initialiseer media-repo als leeg (optioneel, safe)
+        working-directory: media
+        shell: bash
+        run: |
+          set -e
+          if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+            echo "# Rijnagent media" > README.md
+            git config user.name  "github-actions"
+            git config user.email "github-actions@github.com"
+            git add README.md
+            git commit -m "init media repo"
+            git push -u origin main
+            echo "Media-repo geinitialiseerd."
+          else
+            echo "Media-repo heeft al commits."
+          fi
 
-def safe_station_filename(name: str) -> str:
-    return (name.lower()
-                .replace("ä", "ae")
-                .replace("ö", "oe")
-                .replace("ü", "ue")
-                .replace("ß", "ss"))
+      # 7) Kopieer PNG's (safe)
+      - name: Kopieer grafieken naar media-repo (safe)
+        shell: bash
+        run: |
+          set -e
+          if [ -d "graphs" ]; then
+            if ls graphs/*.png >/dev/null 2>&1; then
+              cp graphs/*.png media/
+              echo "PNG-grafieken gekopieerd naar ./media"
+            else
+              echo "Map graphs bestaat, maar geen PNG-bestanden gevonden."
+            fi
+          else
+            echo "Map graphs bestaat niet."
+          fi
 
-def iso_z(dt: datetime) -> str:
-    """ISO8601 met Z, in UTC."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+      # 8) Commit en push (safe)
+      - name: Commit en push grafieken (safe)
+        working-directory: media
+        shell: bash
+        run: |
+          set -e
+          git config user.name  "github-actions"
+          git config user.email "github-actions@github.com"
 
-# =========================================================
-# DATA OPHALEN (PEGELONLINE)
-# =========================================================
+          if ls *.png >/dev/null 2>&1; then
+            git add *.png
+            if ! git diff --cached --quiet; then
+              git commit -m "Update grafieken $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              git push
+              echo "Grafieken gecommit en gepusht"
+            else
+              echo "Geen wijzigingen om te committen."
+            fi
+          else
+            echo "Geen .png-bestanden in ./media — commit overgeslagen."
+          fi
 
-def fetch_current(station_uuid: str):
-    """
-    Haal de actuele meting (cm) op via de station-endpoint.
-    """
-    url = f"{BASE}/stations/{station_uuid}.json?includeTimeseries=true&includeCurrentMeasurement=true"
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    data = r.json()
+      # 9) Verstuur grafieken via WhatsApp (1 media per bericht)
+      - name: Verstuur grafieken via WhatsApp
+        env:
+          TWILIO_SID: ${{ secrets.TWILIO_SID }}
+          TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
+          FROM: "whatsapp:+14155238886"
+          TO: "whatsapp:+31646260683"
+          BASE: "https://raw.githubusercontent.com/Christiaan1984/rijnagent-media/main"
+        shell: bash
+        run: |
+          send_media () {
+            label="$1"
+            file="$2"
+            url="${BASE}/${file}"
+            if curl -s --head "$url" | head -n 1 | grep "200" >/dev/null; then
+              code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json" \
+                -u "${TWILIO_SID}:${TWILIO_AUTH}" \
+                --data-urlencode "From=${FROM}" \
+                --data-urlencode "To=${TO}" \
+                --data-urlencode "Body=${label} - laatste 48 uur" \
+                --data-urlencode "MediaUrl=${url}")
+              echo "${label}: HTTP ${code}"
+            else
+              echo "${label}: nog geen publieke URL gevonden op ${url}"
+            fi
+          }
 
-    # zoek een tijdreeks met unit 'cm' en currentMeasurement
-    for ts in data.get("timeseries", []) or []:
-        cm = ts.get("currentMeasurement")
-        unit = (ts.get("unit") or "").lower()
-        if cm and unit == "cm":
-            try:
-                return int(float(cm["value"]))
-            except Exception:
-                return None
-    return None
-
-def get_waterlevel_timeseries_uuid(station_uuid: str) -> str | None:
-    """
-    Haal de UUID van de waterstand-tijdreeks (unit cm) van een station op.
-    """
-    url = f"{BASE}/stations/{station_uuid}.json?includeTimeseries=true"
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-
-    # Kies de waterstand-reeks: unit 'cm'
-    for ts in data.get("timeseries", []) or []:
-        unit = (ts.get("unit") or "").lower()
-        if unit == "cm":
-            ts_uuid = ts.get("uuid")
-            if ts_uuid:
-                return ts_uuid
-    return None
-
-from datetime import timedelta  # bovenin staat dit waarschijnlijk al geïmporteerd
-
-def fetch_history(station_uuid: str, hours: int):
-    """
-    Haalt de waterstands-metingen (W) van de afgelopen 'hours' uren op
-    via de officiële PEGELONLINE endpoint:
-      /stations/{station_uuid}/W/measurements.json
-    We gebruiken hier start=P2D om 2 dagen historie op te halen.
-    Documentatie: https://www.wasserstaende.de/webservice/dokuRestapi
-    """
-
-    # Gebruik een ISO-8601 periode i.p.v. absolute tijden:
-    # P2D = laatste 2 dagen (48 uur); dit dekt jouw use-case precies.
-    # Je kunt eventueel dynamisch afleiden uit 'hours', maar P2D is duidelijk en robuust.
-    url = f"{BASE}/stations/{station_uuid}/W/measurements.json?start=P2D"
-
-    r = requests.get(url, timeout=45)
-    r.raise_for_status()
-    measurements = r.json() or []
-
-    points = []
-    for m in measurements:
-        try:
-            # JSON: {"timestamp":"2026-01-21T04:00:00+01:00", "value": "312", ...}
-            t = datetime.fromisoformat(m["timestamp"].replace("Z", "+00:00")).timestamp()
-            v = float(m["value"])
-            points.append((t, v))
-        except Exception:
-            continue
-
-    points.sort(key=lambda x: x[0])
-
-    # Debug-logging in Actions: aantal punten + eerste/laatste tijdstempel
-    if points:
-        ts_first = datetime.fromtimestamp(points[0][0]).astimezone().strftime("%d-%m %H:%M")
-        ts_last  = datetime.fromtimestamp(points[-1][0]).astimezone().strftime("%d-%m %H:%M")
-        print(f"[DEBUG] Historie {station_uuid}: {len(points)} punten, van {ts_first} t/m {ts_last}")
-    else:
-        print(f"[DEBUG] Historie {station_uuid}: GEEN punten ontvangen")
-
-    return points
-
-# =========================================================
-# GRAFIEK
-# =========================================================
-
-def make_graph(station: str, points, filepath: str):
-    if not points:
-        # Maak een placeholder zodat de workflow niet stokt
-        plt.figure(figsize=(9, 4))
-        plt.title(f"Rijn – {station} – afgelopen 48 uur")
-        plt.text(0.5, 0.5, "Geen data beschikbaar", ha="center", va="center", fontsize=14)
-        plt.axis("off")
-        plt.tight_layout()
-        plt.savefig(filepath)
-        plt.close()
-        return
-
-    times = [datetime.fromtimestamp(t).astimezone() for t, _ in points]
-    values = [v for _, v in points]
-
-    plt.figure(figsize=(9, 4))
-    plt.plot(times, values, linewidth=2)
-    plt.title(f"Rijn – {station} – afgelopen 48 uur")
-    plt.xlabel("Tijd")
-    plt.ylabel("Waterstand (cm)")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(filepath)
-    plt.close()
-
-# =========================================================
-# MAIN
-# =========================================================
-
-if __name__ == "__main__":
-    ensure_graph_dir()
-
-    now_str = datetime.now().strftime("%d-%m-%Y %H:%M")
-    message_lines = [
-        "🌊 *Rijn Waterstanden – laatste 48 uur*",
-        f"⏰ {now_str}",
-        ""
-    ]
-
-    for station, st_uuid in STATIONS.items():
-        try:
-            current = fetch_current(st_uuid)
-            # logische debug-regel voor Actions
-            print(f"[DEBUG] Fetch current {station}: {current} cm")
-
-            history = fetch_history(st_uuid, HOURS_BACK)
-            print(f"[DEBUG] History punten {station} (laatste {HOURS_BACK}u): {len(history)}")
-
-            # Grafiek bestandsnaam (ASCII)
-            filename = f"{GRAPH_DIR}/{safe_station_filename(station)}_48u.png"
-            make_graph(station, history, filename)
-
-            # Tekst
-            if current is not None:
-                message_lines.append(f"*{station}*: {current} cm")
-            else:
-                message_lines.append(f"*{station}*: geen actuele waarde")
-
-        except Exception as e:
-            message_lines.append(f"*{station}*: fout bij ophalen data")
-            print(f"[ERROR] {station}: {e}")
-
-    # Altijd een tekstbericht sturen
-    message = "\n".join(message_lines)
-    send_whatsapp_text(message)
-
-    print("✅ Tekstbericht verzonden")
-    print("📁 Grafieken gegenereerd in ./graphs/")
-
-
-
+          send_media "BONN"        "bonn_48u.png"
+          send_media "KOELN"       "koeln_48u.png"
+          send_media "DUESSELDORF" "duesseldorf_48u.png"
