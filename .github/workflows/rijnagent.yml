@@ -1,4 +1,9 @@
-
+- name: Toon directory-inhoud (debug)
+  run: |
+    pwd
+    ls -la
+    echo "---- boom (recursief) ----"
+    ls -laR | sed -n '1,200p'
 - name: Toon directory-inhoud (debug)
   run: |
     pwd
