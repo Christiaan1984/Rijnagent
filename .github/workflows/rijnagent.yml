@@ -14,6 +14,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ✅ STAP 2 — PROOF (HIER TOEVOEGEN)
+      - name: PROOF — is dit een scheduled run?
+        run: echo "🔥 Triggered by: $GITHUB_EVENT_NAME at $(date -u)"
+
+    steps:
       # ---------------------------
       # 1) Hoofdrepo uitchecken
       # ---------------------------
