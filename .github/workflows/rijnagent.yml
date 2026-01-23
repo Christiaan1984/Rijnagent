@@ -1,37 +1,148 @@
 
-name: Rijn Waterstanden Agent (TEST)
+name: Rijn Waterstanden Agent
 
 on:
   schedule:
-    - cron: "*/7 * * * *"   # test elke 7 minuten
+    # GitHub cron = UTC
+    # NL wintertijd (CET = UTC+1): 06:00–20:00 NL => 05–19 UTC
+    - cron: "0 5-19 * * *"
+    # NL zomertijd (CEST = UTC+2): 06:00–20:00 NL => 04–18 UTC
+    - cron: "0 4-18 * * *"
   workflow_dispatch:
 
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    steps:
-      - name: PROOF - is dit een scheduled run?
-        run: echo "Triggered by: $GITHUB_EVENT_NAME at $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
-      - name: Checkout hoofd-repo
+    steps:
+      # 1) Hoofdrepo uitchecken
+      - name: Checkout repo
         uses: actions/checkout@v4
 
+      # 2) Python en dependencies
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Installeer dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests twilio matplotlib
 
-      - name: Agent uitvoeren (tekst en grafieken genereren)
+      # 3) Pre-run debug (optioneel)
+      - name: Pre-run debug
+        shell: bash
+        run: |
+          echo "PWD=$(pwd)"
+          echo "--- ls -la . ---"
+          ls -la .
+          echo "--- ls -la graphs ---"
+          ls -la graphs || true
+
+      # 4) Draai agent (maakt tekst en PNG's)
+      - name: Run agent (text and graphs)
         env:
           TWILIO_SID: ${{ secrets.TWILIO_SID }}
           TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
         run: |
           python rijnagent.py
 
-      # ... (de rest van je stappen kopiëren zoals eerder: debug, media-repo checkout,
-      # kopiëren PNG’s, commit/push, en WhatsApp met MediaUrl)
+      # 5) Post-run debug (optioneel)
+      - name: Post-run debug
+        shell: bash
+        run: |
+          echo "--- ls -la graphs after script ---"
+          ls -la graphs || true
+
+      # 6) Media-repo uitchecken (PUBLIC) op branch main - met PAT: MEDIA_TOKEN
+      - name: Checkout media repo
+        uses: actions/checkout@v4
+        with:
+          repository: Christiaan1984/rijnagent-media
+          ref: main
+          token: ${{ secrets.MEDIA_TOKEN }}
+          path: media
+
+      # 7) Initialiseer media-repo als leeg (eenmalige fallback)
+      - name: Init media repo if empty
+        working-directory: media
+        shell: bash
+        run: |
+          set -e
+          if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+            echo "# Rijnagent media" > README.md
+            git config user.name  "github-actions"
+            git config user.email "github-actions@github.com"
+            git add README.md
+            git commit -m "init media repo"
+            git push -u origin main
+            echo "Media repo initialized."
+          else
+            echo "Media repo already initialized."
+          fi
+
+      # 8) Kopieer PNG's (safe)
+      - name: Copy graphs to media repo (safe)
+        shell: bash
+        run: |
+          set -e
+          if [ -d "graphs" ] && ls graphs/*.png >/dev/null 2>&1; then
+            cp graphs/*.png media/
+            echo "Copied PNG graphs to ./media"
+          else
+            echo "No PNG graphs found to copy."
+          fi
+
+      # 9) Commit en push (safe)
+      - name: Commit and push graphs (safe)
+        working-directory: media
+        shell: bash
+        run: |
+          set -e
+          git config user.name  "github-actions"
+          git config user.email "github-actions@github.com"
+
+          if ls *.png >/dev/null 2>&1; then
+            git add *.png
+            if ! git diff --cached --quiet; then
+              git commit -m "Update graphs $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              git push
+              echo "Graphs committed and pushed."
+            else
+              echo "No changes to commit."
+            fi
+          else
+            echo "No PNG files in ./media - skipping commit."
+          fi
+
+      # 10) Verstuur grafieken via WhatsApp (1 media per bericht)
+      - name: Send graphs via WhatsApp
+        env:
+          TWILIO_SID: ${{ secrets.TWILIO_SID }}
+          TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
+          FROM: "whatsapp:+14155238886"
+          TO: "whatsapp:+31646260683"
+          BASE: "https://raw.githubusercontent.com/Christiaan1984/rijnagent-media/main"
+        shell: bash
+        run: |
+          send_media () {
+            label="$1"
+            file="$2"
+            url="${BASE}/${file}"
+            if curl -s --head "$url" | head -n 1 | grep "200" >/dev/null; then
+              code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json" \
+                -u "${TWILIO_SID}:${TWILIO_AUTH}" \
+                --data-urlencode "From=${FROM}" \
+                --data-urlencode "To=${TO}" \
+                --data-urlencode "Body=${label} - last 48 hours" \
+                --data-urlencode "MediaUrl=${url}")
+              echo "${label}: HTTP ${code}"
+            else
+              echo "${label}: no public URL yet at ${url}"
+            fi
+          }
+
+          send_media "BONN"        "bonn_48u.png"
+          send_media "KOELN"       "koeln_48u.png"
+          send_media "DUESSELDORF" "duesseldorf_48u.png"
