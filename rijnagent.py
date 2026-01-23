@@ -299,8 +299,17 @@ if __name__ == "__main__":
     # Opslaan voor volgende run
     save_last_values(new_values)
 
-send_whatsapp("✅ TEST vanuit rijnagent.py – Python verstuurt dit bericht correct.")
-print("TEST WhatsApp verstuurd vanuit Python")
-exit(0)
+message = "\n".join(lines).strip()
+
+# 🔒 VEILIGHEID: zorg dat er altijd iets gestuurd wordt
+if not message:
+    message = "ℹ️ Rijnagent draaide succesvol, maar er waren geen gegevens om te melden."
+
+print("DEBUG — WhatsApp-bericht dat wordt verzonden:\n", message)
+
+send
+
+
+
 
 
