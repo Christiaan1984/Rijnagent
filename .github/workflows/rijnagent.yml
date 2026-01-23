@@ -8,6 +8,8 @@ on:
     - cron: "0 5-19 * * *"
     # NL zomertijd (CEST = UTC+2): 06–20 NL => 04–18 UTC
     - cron: "0 4-18 * * *"
+    # ⬇︎ Test: elke 5 minuten
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
