@@ -2,11 +2,13 @@
 name: Rijn Waterstanden Agent
 
 on:
-  # Let op: cron draait in UTC op GitHub. Zie tijdzone-opmerking hieronder.
   schedule:
-    # CET (wintertijd, NL = UTC+1): 06:00–20:00 lokaal ⇒ 05–19 UTC
+    # ❗ GitHub cron is UTC.
+    # CET (wintertijd, NL = UTC+1): 06:00–20:00 NL → 05–19 UTC
     - cron: "0 5-19 * * *"
-  workflow_dispatch: {}   # handmatig starten via de Actions-tab
+    # CEST (zomertijd, NL = UTC+2): 06:00–20:00 NL → 04–18 UTC
+    - cron: "0 4-18 * * *"
+  workflow_dispatch: {}   # handmatig starten vanuit Actions-tab
 
 jobs:
   run-agent:
@@ -16,7 +18,7 @@ jobs:
       - name: Repository uitchecken
         uses: actions/checkout@v4
 
-      # (Optioneel) eerste keer debuggen waar je bestanden staan
+        # (Optioneel) eerste keer debugging, laat zien waar bestanden staan
       - name: Toon directory-inhoud (debug)
         run: |
           pwd
@@ -29,39 +31,52 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Als je een requirements.txt hebt, gebruik dan de volgende stap
-      # en verwijder de stap erna.
-      # - name: Dependencies installeren (requirements.txt)
-      #   run: |
-      #     pip install -r requirements.txt
+      # (Optioneel) pip-cache om sneller te installeren
+      - name: Cache pip-packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
 
-      - name: Dependencies installeren
+      # Gebruik requirements.txt als die aanwezig is; anders installeer direct.
+      - name: Dependencies installeren via requirements.txt (indien aanwezig)
         run: |
-          pip install requests twilio
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests twilio
+          fi
 
-      # (Optioneel, aanbevolen) last_values.json persistent houden tussen runs
-      # met artifacts. Eerst proberen we te downloaden (als die bestaat).
+      # ⬇️ Trenddata van vorige run ophalen (kan NIET bestaan bij 1e run)
       - name: Vorige trenddata ophalen (artifact)
         uses: actions/download-artifact@v4
         with:
           name: last-values
           path: .
-        continue-on-error: true
+          if-no-artifact-found: ignore   # ← cruciaal: faal niet bij eerste run
 
-      # Voer je script uit. Het script verwacht dat TWILIO_SID en TWILIO_AUTH
-      # via GitHub Secrets worden aangereikt (Settings → Secrets → Actions).
+      # ▶️ Voer je agent uit (leest Twilio uit Secrets; schrijft last_values.json)
       - name: Agent uitvoeren
         env:
           TWILIO_SID: ${{ secrets.TWILIO_SID }}
           TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
+          # Optioneel: override via Secrets/Variables
+          YOUR_WHATSAPP: ${{ vars.YOUR_WHATSAPP }}
+          TWILIO_WHATSAPP: ${{ vars.TWILIO_WHATSAPP }}
+          HIGH_WATER_CM: ${{ vars.HIGH_WATER_CM }}
+          LOW_WATER_CM: ${{ vars.LOW_WATER_CM }}
+          TREND_THRESHOLD_CM: ${{ vars.TREND_THRESHOLD_CM }}
         run: |
           python rijnagent.py
 
-      # Sla de nieuwe last_values.json op als artifact voor de volgende run
+      # ⬆️ Nieuwe trenddata uploaden als artifact (voor volgende run)
       - name: Trenddata opslaan (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: last-values
           path: last_values.json
-          if-no-files-found: ignore
+          if-no-files-found: ignore      # faal niet als bestand ontbreekt
+          retention-days: 14             # bewaar 14 dagen (pas aan naar wens)
