@@ -1,18 +1,67 @@
-- name: Toon directory-inhoud (debug)
-  run: |
-    pwd
-    ls -la
-    echo "---- boom (recursief) ----"
-    ls -laR | sed -n '1,200p'
-- name: Toon directory-inhoud (debug)
-  run: |
-    pwd
-    ls -la
-    echo "---- .github ----"
-    ls -la .github || true
-    echo "---- .github/workflows ----"
-    ls -la .github/workflows || true
-    echo "---- src ----"
-    ls -la src || true
-    echo "---- scripts ----"
-    ls -la scripts || true
+
+name: Rijn Waterstanden Agent
+
+on:
+  # Let op: cron draait in UTC op GitHub. Zie tijdzone-opmerking hieronder.
+  schedule:
+    # CET (wintertijd, NL = UTC+1): 06:00–20:00 lokaal ⇒ 05–19 UTC
+    - cron: "0 5-19 * * *"
+  workflow_dispatch: {}   # handmatig starten via de Actions-tab
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository uitchecken
+        uses: actions/checkout@v4
+
+      # (Optioneel) eerste keer debuggen waar je bestanden staan
+      - name: Toon directory-inhoud (debug)
+        run: |
+          pwd
+          ls -la
+          echo "---- .github/workflows ----"
+          ls -la .github/workflows || true
+
+      - name: Python installeren
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Als je een requirements.txt hebt, gebruik dan de volgende stap
+      # en verwijder de stap erna.
+      # - name: Dependencies installeren (requirements.txt)
+      #   run: |
+      #     pip install -r requirements.txt
+
+      - name: Dependencies installeren
+        run: |
+          pip install requests twilio
+
+      # (Optioneel, aanbevolen) last_values.json persistent houden tussen runs
+      # met artifacts. Eerst proberen we te downloaden (als die bestaat).
+      - name: Vorige trenddata ophalen (artifact)
+        uses: actions/download-artifact@v4
+        with:
+          name: last-values
+          path: .
+        continue-on-error: true
+
+      # Voer je script uit. Het script verwacht dat TWILIO_SID en TWILIO_AUTH
+      # via GitHub Secrets worden aangereikt (Settings → Secrets → Actions).
+      - name: Agent uitvoeren
+        env:
+          TWILIO_SID: ${{ secrets.TWILIO_SID }}
+          TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
+        run: |
+          python rijnagent.py
+
+      # Sla de nieuwe last_values.json op als artifact voor de volgende run
+      - name: Trenddata opslaan (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-values
+          path: last_values.json
+          if-no-files-found: ignore
