@@ -46,12 +46,13 @@ def ensure_graph_dir():
     if not os.path.exists(GRAPH_DIR):
         os.makedirs(GRAPH_DIR)
 
+
 def safe_station_filename(name: str) -> str:
     return (name.lower()
-                .replace("ü","u")
-                .replace("ö","o")
-                .replace("ä","a")
-                .replace("ß","ss"))
+                .replace("ä", "ae")
+                .replace("ö", "oe")
+                .replace("ü", "ue")
+                .replace("ß", "ss"))
 
 def iso_z(dt: datetime) -> str:
     """ISO8601 met Z, in UTC."""
@@ -207,3 +208,4 @@ if __name__ == "__main__":
 
     print("✅ Tekstbericht verzonden")
     print("📁 Grafieken gegenereerd in ./graphs/")
+
