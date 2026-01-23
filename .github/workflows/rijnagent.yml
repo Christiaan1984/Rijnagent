@@ -3,8 +3,11 @@ name: Rijn Waterstanden Agent
 
 on:
   schedule:
-    - cron: "0 5-19 * * *"   # NL wintertijd
-    - cron: "0 4-18 * * *"   # NL zomertijd
+    # GitHub cron = UTC
+    # NL wintertijd (CET = UTC+1): 06–20 NL => 05–19 UTC
+    - cron: "0 5-19 * * *"
+    # NL zomertijd (CEST = UTC+2): 06–20 NL => 04–18 UTC
+    - cron: "0 4-18 * * *"
   workflow_dispatch:
 
 jobs:
@@ -12,9 +15,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ---------------------------
+      # 1) Hoofdrepo uitchecken
+      # ---------------------------
       - name: Checkout hoofd-repo
         uses: actions/checkout@v4
 
+      # ---------------------------
+      # 2) Python & deps
+      # ---------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -22,28 +31,72 @@ jobs:
 
       - name: Installeer dependencies
         run: |
+          pip install --upgrade pip
           pip install requests twilio matplotlib
 
-      - name: Draai agent (maakt tekst + PNG's)
+      # ---------------------------
+      # 3) Debug vóór script
+      # ---------------------------
+      - name: Toon inhoud vóór script (debug)
+        shell: bash
+        run: |
+          echo "PWD="; pwd
+          echo "--- ls -la . ---"; ls -la .
+          echo "--- ls -la graphs (verwacht: bestaat nog niet) ---"
+          ls -la graphs || true
+
+      # ---------------------------
+      # 4) Draai agent (maakt tekst + PNG's)
+      # ---------------------------
+      - name: Agent uitvoeren (tekst + grafieken genereren)
         env:
           TWILIO_SID: ${{ secrets.TWILIO_SID }}
           TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
         run: |
           python rijnagent.py
 
-      # ==============================
-      # PUSH GRAFIEKEN NAAR MEDIA-REPO
-      # ==============================
+      # ---------------------------
+      # 5) Debug ná script
+      # ---------------------------
+      - name: Toon inhoud ná script (debug)
+        shell: bash
+        run: |
+          echo "--- ls -la graphs (verwacht: nu .png's) ---"
+          ls -la graphs || true
 
+      # ---------------------------
+      # 6) Media-repo uitchecken (PUBLIC) op branch main
+      #    Gebruik PAT met write toegang: MEDIA_TOKEN
+      # ---------------------------
       - name: Checkout media-repo
         uses: actions/checkout@v4
         with:
           repository: Christiaan1984/rijnagent-media
           ref: main
-          token: ${{ secrets.MEDIA_TOKEN }}   # <-- PAT met write toegang
+          token: ${{ secrets.MEDIA_TOKEN }}
           path: media
 
-      
+      # (Optioneel) init-fallback: alleen nodig als repo leeg was
+      - name: Initialiseer media-repo als leeg (optioneel, safe)
+        working-directory: media
+        shell: bash
+        run: |
+          set -e
+          if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+            echo "# Rijnagent media" > README.md
+            git config user.name  "github-actions"
+            git config user.email "github-actions@github.com"
+            git add README.md
+            git commit -m "init media repo"
+            git push -u origin main
+            echo "Media-repo geinitialiseerd."
+          else
+            echo "Media-repo heeft al commits."
+          fi
+
+      # ---------------------------
+      # 7) Kopieer PNG’s (safe)
+      # ---------------------------
       - name: Kopieer grafieken naar media-repo (safe)
         shell: bash
         run: |
@@ -51,28 +104,42 @@ jobs:
           if [ -d "graphs" ]; then
             if ls graphs/*.png >/dev/null 2>&1; then
               cp graphs/*.png media/
-                echo "✅ PNG-grafieken gekopieerd."
-              else
-                echo "⚠️ Map graphs bestaat, maar geen PNG-bestanden gevonden."
-              fi
+              echo "✅ PNG-grafieken gekopieerd naar ./media"
+            else
+              echo "⚠️ Map graphs bestaat, maar geen PNG-bestanden gevonden."
+            fi
           else
             echo "⚠️ Map graphs bestaat niet."
           fi
 
-
-      - name: Commit & push grafieken
+      # ---------------------------
+      # 8) Commit & push (safe)
+      # ---------------------------
+      - name: Commit & push grafieken (safe)
         working-directory: media
+        shell: bash
         run: |
-          git config user.name "github-actions"
+          set -e
+          git config user.name  "github-actions"
           git config user.email "github-actions@github.com"
-          git add *.png
-          git commit -m "Update grafieken $(date -u)"
-          git push
 
-      # ==============================
-      # VERSTUUR GRAFIEKEN VIA WHATSAPP
-      # ==============================
+          if ls *.png >/dev/null 2>&1; then
+            git add *.png
+            if ! git diff --cached --quiet; then
+              git commit -m "Update grafieken $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              git push
+              echo "✅ Grafieken gecommit & gepusht"
+            else
+              echo "ℹ️ Geen wijzigingen om te committen."
+            fi
+          else
+            echo "ℹ️ Geen .png-bestanden in ./media — commit wordt overgeslagen."
+          fi
 
+      # ---------------------------
+      # 9) Verstuur grafieken via WhatsApp (3 losse media-berichten)
+      #    WhatsApp ondersteunt 1 media per bericht
+      # ---------------------------
       - name: Verstuur grafieken via WhatsApp
         env:
           TWILIO_SID: ${{ secrets.TWILIO_SID }}
@@ -80,24 +147,25 @@ jobs:
           FROM: "whatsapp:+14155238886"
           TO: "whatsapp:+31646260683"
           BASE: "https://raw.githubusercontent.com/Christiaan1984/rijnagent-media/main"
+        shell: bash
         run: |
-          curl -X POST https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json \
-          -u "$TWILIO_SID:$TWILIO_AUTH" \
-          --data-urlencode "From=$FROM" \
-          --data-urlencode "To=$TO" \
-          --data-urlencode "Body=📈 Bonn – afgelopen 48 uur" \
-          --data-urlencode "MediaUrl=$BASE/bonn_48u.png"
+          send_media () {
+            local label="$1"
+            local file="$2"
+            local url="${BASE}/${file}"
+            if curl -s --head "$url" | head -n 1 | grep "200" >/dev/null; then
+              code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json" \
+                -u "${TWILIO_SID}:${TWILIO_AUTH}" \
+                --data-urlencode "From=${FROM}" \
+                --data-urlencode "To=${TO}" \
+                --data-urlencode "Body=📈 ${label} – afgelopen 48 uur" \
+                --data-urlencode "MediaUrl=${url}")
+              echo "${label}: HTTP ${code}"
+            else
+              echo "⚠️ ${label}: nog geen publieke URL gevonden op ${url}"
+            fi
+          }
 
-          curl -X POST https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json \
-          -u "$TWILIO_SID:$TWILIO_AUTH" \
-          --data-urlencode "From=$FROM" \
-          --data-urlencode "To=$TO" \
-          --data-urlencode "Body=📈 Köln – afgelopen 48 uur" \
-          --data-urlencode "MediaUrl=$BASE/koln_48u.png"
-
-          curl -X POST https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json \
-          -u "$TWILIO_SID:$TWILIO_AUTH" \
-          --data-urlencode "From=$FROM" \
-          --data-urlencode "To=$TO" \
-          --data-urlencode "Body=📈 Düsseldorf – afgelopen 48 uur" \
-          --data-urlencode "MediaUrl=$BASE/dusseldorf_48u.png"
+          send_media "BONN"        "bonn_48u.png"
+          send_media "KÖLN"        "koeln_48u.png"
+          send_media "DÜSSELDORF"  "duesseldorf_48u.png"
