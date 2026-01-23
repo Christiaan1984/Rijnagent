@@ -1,139 +1,232 @@
 
+# Rijnagent – WhatsApp meldingen voor actuele en verwachte waterstanden Rijn
+# Features:
+#  - Actuele waterstanden (PEGELONLINE, officiële bron voor ELWIS)
+#  - 24u voorspellings-alarmering (>500 cm of <200 cm)
+#  - Trendmeldingen snelle stijging/daling (default 5 cm/uur)
+#  - Persistente opslag vorige waarden in last_values.json
+#
+# Let op (GitHub Actions):
+#  - Zet TWILIO_SID en TWILIO_AUTH als Secrets in je repo
+#  - Workflow kan last_values.json ophalen/opslaan via artifacts
+
+import os
+import json
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+
 import requests
 from twilio.rest import Client
-from datetime import datetime
-import json
-import os
 
 # ------------------------------------------
 # CONFIG
 # ------------------------------------------
 
-TWILIO_SID = "${{ secrets.TWILIO_ACCOUNT_SID }}"
-TWILIO_AUTH = "${{ secrets.TWILIO_AUTH_TOKEN }}"
-TWILIO_WHATSAPP = "whatsapp:+14155238886"
-YOUR_WHATSAPP = "whatsapp:+31646260683"
+# Twilio-credentials uit omgevingsvariabelen (veilig voor GitHub Actions)
+TWILIO_SID = os.getenv("TWILIO_SID", "").strip()
+TWILIO_AUTH = os.getenv("TWILIO_AUTH", "").strip()
 
+# Twilio WhatsApp zender (Sandbox) en jouw nummer
+TWILIO_WHATSAPP = os.getenv("TWILIO_WHATSAPP", "whatsapp:+14155238886").strip()
+YOUR_WHATSAPP = os.getenv("YOUR_WHATSAPP", "whatsapp:+31646260683").strip()
+
+# PEGELONLINE basis-URL (officiële REST-API van WSV)
 PEGEL_BASE = "https://www.wasserstaende.de/webservices/rest-api/v2/stations"
 
-STATIONS = {
+# Officiële PEGELONLINE UUID's voor de stations
+STATIONS: Dict[str, str] = {
     "BONN": "593647aa-9fea-43ec-a7d6-6476a76ae868",
     "KÖLN": "a6ee8177-107b-47dd-bcfd-30960ccc6e9c",
-    "DÜSSELDORF": "8f7e5f92-1153-4f93-acba-ca48670c8ca9"
+    "DÜSSELDORF": "8f7e5f92-1153-4f93-acba-ca48670c8ca9",
 }
 
+# Alarmdrempels (in cm) – aanpasbaar via env
+HIGH_WATER_CM = int(os.getenv("HIGH_WATER_CM", "500"))   # 5.00 m
+LOW_WATER_CM  = int(os.getenv("LOW_WATER_CM",  "200"))   # 2.00 m
+
+# Trenddrempel (in cm per uur) – aanpasbaar via env
+TREND_THRESHOLD_CM = int(os.getenv("TREND_THRESHOLD_CM", "5"))
+
+# Bestand voor trendvergelijking
+LAST_VALUES_FILE = os.getenv("LAST_VALUES_FILE", "last_values.json")
+
+# Request-timeout (seconden)
+HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
+
+
 # ------------------------------------------
-# HELPERS: OPSLAAN / LADEN VAN VORIGE METINGEN
+# HULPFUNCTIES (bestanden)
 # ------------------------------------------
 
-def load_last_values(path="last_values.json"):
+def load_last_values(path: str = LAST_VALUES_FILE) -> Dict[str, float]:
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r") as f:
-            return json.load(f)
-    except:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # forceer numeriek
+            return {k: float(v) for k, v in data.items()}
+    except Exception:
         return {}
 
-def save_last_values(values, path="last_values.json"):
-    with open(path, "w") as f:
-        json.dump(values, f)
+def save_last_values(values: Dict[str, float], path: str = LAST_VALUES_FILE) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(values, f)
+    except Exception:
+        # In Actions is het geen ramp als dit faalt; workflow vangt artifacts af
+        pass
+
 
 # ------------------------------------------
-# ACTUELE WATERSTAND OPHALEN
+# HULP: tijd formatteren
 # ------------------------------------------
 
-def fetch_waterlevel(uuid):
+def iso_to_local_str(iso_ts: str) -> str:
+    """
+    Converteer ISO8601 (met Z of +offset) naar locale tijdstring "dd-mm-YYYY HH:MM".
+    """
+    try:
+        ts = iso_ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts)
+        # Zet om naar lokale tijdzone van runner
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc).astimezone()
+        else:
+            dt = dt.astimezone()
+        return dt.strftime("%d-%m-%Y %H:%M")
+    except Exception:
+        return iso_ts
+
+
+# ------------------------------------------
+# DATA-OPHALING (PEGELONLINE)
+# ------------------------------------------
+
+def fetch_waterlevel(uuid: str) -> Optional[Dict[str, str]]:
+    """
+    Haal actuele waterstand (cm) + timestamp op voor een station-UUID.
+    """
     url = f"{PEGEL_BASE}/{uuid}.json?includeTimeseries=true&includeCurrentMeasurement=true"
-    r = requests.get(url, timeout=15)
+    r = requests.get(url, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
     data = r.json()
 
     for ts in data.get("timeseries", []):
         cm = ts.get("currentMeasurement")
-        if cm and ts.get("unit", "").lower() == "cm":
+        unit = (ts.get("unit") or "").lower()
+        if cm and unit == "cm":
+            value = cm.get("value")
+            # Zorg dat value numeriek is
+            try:
+                value_num = float(value)
+            except Exception:
+                continue
             return {
-                "station": data.get("shortname", "Onbekend"),
-                "value": cm.get("value"),
-                "timestamp": cm.get("timestamp")
+                "station": data.get("shortname") or data.get("longname") or "Onbekend",
+                "value_cm": value_num,
+                "timestamp": cm.get("timestamp"),
             }
     return None
 
-# ------------------------------------------
-# VOORSPELLING (FORECAST) OPHALEN
-# ------------------------------------------
 
-def fetch_forecast(uuid):
+def fetch_forecast(uuid: str) -> List[Dict[str, float]]:
+    """
+    Haal voorspellingsreeks (WV = Wasserstandvorhersage) op.
+    Geeft lijst met dicts: {"timestamp": str, "value": float}
+    """
     url = f"{PEGEL_BASE}/{uuid}.json?includeForecastTimeseries=true&hasTimeseries=WV"
-    r = requests.get(url, timeout=15)
+    r = requests.get(url, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
     data = r.json()
 
-    forecasts = []
-
+    out: List[Dict[str, float]] = []
     for ts in data.get("timeseries", []):
-        if ts.get("shortname", "").upper() == "WV":
-            for value in ts.get("forecast", []):
-                forecasts.append({
-                    "timestamp": value.get("timestamp"),
-                    "value": value.get("value")
-                })
+        # Sommige timeseries kunnen meerdere velden hebben; we zoeken WV/forecast
+        if (ts.get("shortname") or "").upper() == "WV":
+            # Documentatie geeft een forecast-veld met punten
+            for point in ts.get("forecast", []) or []:
+                try:
+                    val = float(point.get("value"))
+                    out.append({
+                        "timestamp": point.get("timestamp"),
+                        "value": val
+                    })
+                except Exception:
+                    continue
+    return out
 
-    return forecasts
 
 # ------------------------------------------
-# CHECK: ALARM BIJ 24-UURS VOORSPELLING
+# ALARM-LOGICA
 # ------------------------------------------
 
-def check_alarm(forecasts):
+def check_forecast_alarm(forecasts: List[Dict[str, float]]) -> Optional[str]:
+    """
+    Checkt of er binnen 24 uur een waarde > HIGH_WATER_CM of < LOW_WATER_CM voorkomt.
+    """
     if not forecasts:
         return None
 
-    now = datetime.now().astimezone()
-    limit = now.timestamp() + 24*3600
+    now = datetime.now(timezone.utc)
+    horizon = now.timestamp() + 24 * 3600
 
     for f in forecasts:
+        ts = f.get("timestamp")
+        if not ts:
+            continue
         try:
-            t = datetime.fromisoformat(f["timestamp"].replace("Z", "+00:00"))
-        except:
+            ts_parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if ts_parsed.tzinfo is None:
+                ts_parsed = ts_parsed.replace(tzinfo=timezone.utc)
+        except Exception:
             continue
 
-        if t.timestamp() <= limit:
-            cm = f["value"]
-            if cm > 500:
-                return f"🚨 *HOOGWATER ALERT!* Verwacht > 5.00 m ({cm} cm) binnen 24 uur."
-            if cm < 200:
-                return f"⚠️ *LAAGWATER ALERT!* Verwacht < 2.00 m ({cm} cm) binnen 24 uur."
+        if ts_parsed.timestamp() <= horizon:
+            v = f.get("value")
+            if v is None:
+                continue
+            if v > HIGH_WATER_CM:
+                return f"🚨 *HOOGWATER ALERT!* Verwacht > {HIGH_WATER_CM/100:.2f} m ({int(v)} cm) binnen 24 uur."
+            if v < LOW_WATER_CM:
+                return f"⚠️ *LAAGWATER ALERT!* Verwacht < {LOW_WATER_CM/100:.2f} m ({int(v)} cm) binnen 24 uur."
 
     return None
 
-# ------------------------------------------
-# CHECK: SNELLE STIJGING / DALING
-# ------------------------------------------
 
-def check_trend(station_name, current_value, last_values, threshold=5):
-    if station_name not in last_values:
+def check_trend(name: str, current_value_cm: float, last_values: Dict[str, float],
+                threshold_cm: float = TREND_THRESHOLD_CM) -> Optional[str]:
+    """
+    Trendmelding bij snelle stijging/daling t.o.v. vorige meting (per uur).
+    """
+    if name not in last_values:
         return None
-
     try:
-        prev = last_values[station_name]
-    except:
+        prev = float(last_values[name])
+    except Exception:
         return None
 
-    diff = current_value - prev
-
-    if diff > threshold:
-        return f"📈 *SNELLE STIJGING* bij {station_name}: +{diff} cm sinds vorige meting."
-    elif diff < -threshold:
-        return f"📉 *SNELLE DALING* bij {station_name}: {diff} cm sinds vorige meting."
-
+    diff = current_value_cm - prev
+    if diff > threshold_cm:
+        return f"📈 *SNELLE STIJGING* bij {name}: +{int(diff)} cm sinds vorige meting."
+    if diff < -threshold_cm:
+        return f"📉 *SNELLE DALING* bij {name}: {int(diff)} cm sinds vorige meting."
     return None
 
+
 # ------------------------------------------
-# WHATSAPP VERZENDEN
+# NOTIFICATIE (Twilio WhatsApp)
 # ------------------------------------------
 
-def send_whatsapp(message):
+def validate_twilio_creds():
+    if not TWILIO_SID or not TWILIO_AUTH:
+        raise RuntimeError(
+            "Twilio-credentials ontbreken. Zorg voor TWILIO_SID en TWILIO_AUTH "
+            "(env of GitHub Secrets)."
+        )
+
+def send_whatsapp(message: str) -> None:
+    validate_twilio_creds()
     client = Client(TWILIO_SID, TWILIO_AUTH)
     client.messages.create(
         body=message,
@@ -141,87 +234,68 @@ def send_whatsapp(message):
         to=YOUR_WHATSAPP
     )
 
+
 # ------------------------------------------
 # MAIN
 # ------------------------------------------
 
 if __name__ == "__main__":
-
-    # VOORBEREIDING
     last_values = load_last_values()
-    new_values = {}
+    new_values: Dict[str, float] = {}
 
-    lines = [
+    header_time = datetime.now().astimezone().strftime("%d-%m-%Y %H:%M")
+    lines: List[str] = [
         "🌊 *Rijn Waterstanden (ELWIS/PEGELONLINE)*",
-        f"⏰ {datetime.now().strftime('%d-%m-%Y %H:%M')}\n"
+        f"⏰ {header_time}\n"
     ]
 
-    alarm_lines = []
-    trend_lines = []
-
-    # --------------------------------------
-    # PER STATION (BONN, KÖLN, DÜSSELDORF)
-    # --------------------------------------
+    forecast_alarms: List[str] = []
+    trend_msgs: List[str] = []
 
     for name, uuid in STATIONS.items():
         try:
-            # ACTUEEL
-            d = fetch_waterlevel(uuid)
+            # Actuele waterstand
+            cur = fetch_waterlevel(uuid)
+            if cur:
+                t_local = iso_to_local_str(cur["timestamp"])
+                val = float(cur["value_cm"])
+                new_values[name] = val
 
-            if d:
-                try:
-                    dt = datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00"))
-                    t = dt.strftime("%d-%m-%Y %H:%M")
-                except:
-                    t = d["timestamp"]
-
-                # Berichtregel
                 lines.append(
                     f"*{name}*\n"
-                    f"Waterstand: {d['value']} cm\n"
-                    f"Gemeten: {t}\n"
+                    f"Waterstand: {int(val)} cm\n"
+                    f"Gemeten: {t_local}\n"
                 )
 
-                # TREND
-                new_values[name] = d['value']
-                trend_msg = check_trend(name, d['value'], last_values)
-                if trend_msg:
-                    trend_lines.append(trend_msg)
-
+                # Trendmelding
+                tr = check_trend(name, val, last_values)
+                if tr:
+                    trend_msgs.append(tr)
             else:
                 lines.append(f"*{name}*: ❌ Geen actuele waarde.\n")
 
-            # VOORSPELLING
-            forecasts = fetch_forecast(uuid)
-            alarm = check_alarm(forecasts)
+            # Voorspelling (24u)
+            fc = fetch_forecast(uuid)
+            alarm = check_forecast_alarm(fc)
             if alarm:
-                alarm_lines.append(f"*{name}*: {alarm}")
+                forecast_alarms.append(f"*{name}*: {alarm}")
 
         except Exception as e:
             lines.append(f"*{name}*: ❌ Fout: {e}\n")
 
-    # --------------------------------------
-    # SAMENVOEGEN VAN MELDINGEN
-    # --------------------------------------
-
-    if alarm_lines:
+    # Secties toevoegen
+    if forecast_alarms:
         lines.append("\n🚨 *VOORSPELLING-ALARMEN*")
-        lines.extend(alarm_lines)
+        lines.extend(forecast_alarms)
     else:
         lines.append("\nGeen bijzondere voorspellingen binnen 24 uur.")
 
-    if trend_lines:
+    if trend_msgs:
         lines.append("\n📊 *SNELLE TREND MELDINGEN*")
-        lines.extend(trend_lines)
+        lines.extend(trend_msgs)
     else:
         lines.append("\nGeen opvallende stijging of daling sinds vorige meting.")
 
     # Opslaan voor volgende run
     save_last_values(new_values)
-
-    # Bericht versturen
-    message = "\n".join(lines)
-    send_whatsapp(message)
-
-    print("WhatsApp-bericht verzonden.")
 
