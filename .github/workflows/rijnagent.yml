@@ -3,11 +3,8 @@ name: Rijn Waterstanden Agent
 
 on:
   schedule:
-    # GitHub cron = UTC
-    # NL wintertijd (CET = UTC+1): 06–20 uur → 05–19
-    - cron: "0 5-19 * * *"
-    # NL zomertijd (CEST = UTC+2): 06–20 uur → 04–18
-    - cron: "0 4-18 * * *"
+    - cron: "0 5-19 * * *"   # 06–20 NL (wintertijd, UTC+1)
+    - cron: "0 4-18 * * *"   # 06–20 NL (zomertijd, UTC+2)
   workflow_dispatch:
 
 jobs:
@@ -27,13 +24,38 @@ jobs:
         run: |
           pip install requests twilio
 
-      # ✅ JUISTE manier: download mag falen bij 1e run
+      # MAG falen bij 1e run (artifact bestaat nog niet)
       - name: Vorige trenddata ophalen (artifact)
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: last-values
           path: .
+
+      # 🔎  Twilio "smoke test": stuur een kort testbericht via de REST API
+      - name: Twilio WhatsApp smoke test
+        env:
+          TWILIO_SID: ${{ secrets.TWILIO_SID }}
+          TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
+          TO: "whatsapp:+31646260683"              # jouw nummer
+          FROM: "whatsapp:+14155238886"           # Twilio sandbox
+        run: |
+          echo "SID present? ${TWILIO_SID:+YES}"
+          echo "AUTH present? ${TWILIO_AUTH:+YES}"
+          # TEST-bericht: verwacht 201 Created bij succes
+          curl -s -o response.json -w "%{http_code}\n" -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json" \
+            --data-urlencode "From=${FROM}" \
+            --data-urlencode "To=${TO}" \
+            --data-urlencode "Body=✅ Twilio smoke test vanaf GitHub Actions" \
+            -u "${TWILIO_SID}:${TWILIO_AUTH}" | tee http_status.txt
+          echo "HTTP status:" $(cat http_status.txt)
+          echo "Response:"; cat response.json
+          # Als Twilio geen 201 teruggeeft: hard falen met duidelijke fout
+          if [ "$(cat http_status.txt)" != "201" ]; then
+            echo "❌ Twilio smoke test mislukt. Check SID/AUTH/Sandbox."
+            exit 1
+          fi
+          echo "✅ Twilio smoke test geslaagd."
 
       - name: Agent uitvoeren
         env:
