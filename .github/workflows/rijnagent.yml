@@ -43,12 +43,21 @@ jobs:
           token: ${{ secrets.MEDIA_TOKEN }}   # <-- PAT met write toegang
           path: media
 
+      
       - name: Kopieer grafieken naar media-repo (safe)
+        shell: bash
         run: |
-          if [ -d graphs ] && ls graphs/*.png >/dev/null 2>&1; then
-            cp graphs/*.png media/
-            echo "PNG-grafieken gekopieerd."
+          set -e
+          if [ -d "graphs" ]; then
+            if ls graphs/*.png >/dev/null 2>&1; then
+              cp graphs/*.png media/
+                echo "✅ PNG-grafieken gekopieerd."
+              else
+                echo "⚠️ Map graphs bestaat, maar geen PNG-bestanden gevonden."
+              fi
           else
+            echo "⚠️ Map graphs bestaat niet."
+          fi
 
 
       - name: Commit & push grafieken
