@@ -299,3 +299,8 @@ if __name__ == "__main__":
     # Opslaan voor volgende run
     save_last_values(new_values)
 
+send_whatsapp("✅ TEST vanuit rijnagent.py – Python verstuurt dit bericht correct.")
+print("TEST WhatsApp verstuurd vanuit Python")
+exit(0)
+
+
