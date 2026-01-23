@@ -43,9 +43,13 @@ jobs:
           token: ${{ secrets.MEDIA_TOKEN }}   # <-- PAT met write toegang
           path: media
 
-      - name: Kopieer grafieken naar media-repo
+      - name: Kopieer grafieken naar media-repo (safe)
         run: |
-          cp -r graphs/*.png media/
+          if [ -d graphs ] && ls graphs/*.png >/dev/null 2>&1; then
+            cp graphs/*.png media/
+            echo "PNG-grafieken gekopieerd."
+          else
+
 
       - name: Commit & push grafieken
         working-directory: media
