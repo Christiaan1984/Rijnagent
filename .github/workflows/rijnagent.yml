@@ -3,9 +3,8 @@ name: Rijn Waterstanden Agent
 
 on:
   schedule:
-    # GitHub cron = UTC
-    - cron: "0 5-19 * * *"   # 06–20 NL wintertijd (UTC+1)
-    - cron: "0 4-18 * * *"   # 06–20 NL zomertijd (UTC+2)
+    - cron: "0 5-19 * * *"   # NL wintertijd
+    - cron: "0 4-18 * * *"   # NL zomertijd
   workflow_dispatch:
 
 jobs:
@@ -13,39 +12,78 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Repository uitchecken
+      - name: Checkout hoofd-repo
         uses: actions/checkout@v4
 
-      - name: Python installeren
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Dependencies installeren
+      - name: Installeer dependencies
         run: |
           pip install requests twilio matplotlib
 
-      # Mag falen bij eerste run
-      - name: Vorige trenddata ophalen (artifact)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: last-values
-          path: .
-
-      # ✅ ENIGE WhatsApp die nog wordt verstuurd
-      - name: Agent uitvoeren
+      - name: Draai agent (maakt tekst + PNG's)
         env:
           TWILIO_SID: ${{ secrets.TWILIO_SID }}
           TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
         run: |
           python rijnagent.py
 
-      - name: Trenddata opslaan (artifact)
-        if: always()
-        uses: actions/upload-artifact@v4
+      # ==============================
+      # PUSH GRAFIEKEN NAAR MEDIA-REPO
+      # ==============================
+
+      - name: Checkout media-repo
+        uses: actions/checkout@v4
         with:
-          name: last-values
-          path: last_values.json
-          if-no-files-found: ignore
-          retention-days: 14
+          repository: <JOUW-GITHUB-NAAM>/rijnagent-media
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: media
+
+      - name: Kopieer grafieken naar media-repo
+        run: |
+          cp -r graphs/*.png media/
+
+      - name: Commit & push grafieken
+        working-directory: media
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add *.png
+          git commit -m "Update grafieken $(date -u)"
+          git push
+
+      # ==============================
+      # VERSTUUR GRAFIEKEN VIA WHATSAPP
+      # ==============================
+
+      - name: Verstuur grafieken via WhatsApp
+        env:
+          TWILIO_SID: ${{ secrets.TWILIO_SID }}
+          TWILIO_AUTH: ${{ secrets.TWILIO_AUTH }}
+          FROM: "whatsapp:+14155238886"
+          TO: "whatsapp:+31646260683"
+          BASE: "https://raw.githubusercontent.com/<JOUW-GITHUB-NAAM>/rijnagent-media/main"
+        run: |
+          curl -X POST https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json \
+          -u "$TWILIO_SID:$TWILIO_AUTH" \
+          --data-urlencode "From=$FROM" \
+          --data-urlencode "To=$TO" \
+          --data-urlencode "Body=📈 Bonn – afgelopen 48 uur" \
+          --data-urlencode "MediaUrl=$BASE/bonn_48u.png"
+
+          curl -X POST https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json \
+          -u "$TWILIO_SID:$TWILIO_AUTH" \
+          --data-urlencode "From=$FROM" \
+          --data-urlencode "To=$TO" \
+          --data-urlencode "Body=📈 Köln – afgelopen 48 uur" \
+          --data-urlencode "MediaUrl=$BASE/koln_48u.png"
+
+          curl -X POST https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json \
+          -u "$TWILIO_SID:$TWILIO_AUTH" \
+          --data-urlencode "From=$FROM" \
+          --data-urlencode "To=$TO" \
+          --data-urlencode "Body=📈 Düsseldorf – afgelopen 48 uur" \
+          --data-urlencode "MediaUrl=$BASE/dusseldorf_48u.png"
