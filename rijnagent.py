@@ -106,25 +106,52 @@ def get_waterlevel_timeseries_uuid(station_uuid: str) -> str | None:
 
 def fetch_history(station_uuid: str, hours: int):
     """
-    Haal de metingen van de afgelopen 'hours' uren op via de timeseries-endpoint.
+    Haalt betrouwbare historische waterstanden (cm) op voor de afgelopen X uur.
     """
-    ts_uuid = get_waterlevel_timeseries_uuid(station_uuid)
+    # 1) haal station + alle tijdreeksen op
+    r = requests.get(
+        f"{BASE}/stations/{station_uuid}.json?includeTimeseries=true",
+        timeout=30
+    )
+    r.raise_for_status()
+    station = r.json()
+
+    # 2) kies expliciet de waterstand-reeks
+    ts_uuid = None
+    for ts in station.get("timeseries", []):
+        unit = (ts.get("unit") or "").lower()
+        name = ((ts.get("longname") or "") + (ts.get("shortname") or "")).lower()
+
+        if unit == "cm" and ("wasser" in name or ts.get("shortname") == "W"):
+            ts_uuid = ts.get("uuid")
+            break
+
     if not ts_uuid:
+        print("[WARN] Geen waterstand-timeseries gevonden")
         return []
 
-    # starttijd = nu - 48 uur
-    start = datetime.now(timezone.utc) - timedelta(hours=hours)
-    start_iso = iso_z(start)
+    # 3) tijdvenster
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=hours)
 
-    # measurements endpoint (per timeseries)
-    # Gebruik queryparam 'start' om vanaf 48u geleden op te halen
-    url = f"{BASE}/timeseries/{ts_uuid}/measurements.json?start={start_iso}"
-    r = requests.get(url, timeout=45)
+    params = {
+        "start": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "end": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "pageSize": 2000,
+        "includeIncomplete": "true"
+    }
+
+    # 4) measurements ophalen
+    r = requests.get(
+        f"{BASE}/timeseries/{ts_uuid}/measurements.json",
+        params=params,
+        timeout=45
+    )
     r.raise_for_status()
-    arr = r.json() or []
+    measurements = r.json() or []
 
     points = []
-    for m in arr:
+    for m in measurements:
         try:
             t = datetime.fromisoformat(m["timestamp"].replace("Z", "+00:00")).timestamp()
             v = float(m["value"])
@@ -132,8 +159,8 @@ def fetch_history(station_uuid: str, hours: int):
         except Exception:
             continue
 
-    # sorteren op tijd
     points.sort(key=lambda x: x[0])
+    print(f"[DEBUG] Historiepunten opgehaald: {len(points)}")
     return points
 
 # =========================================================
@@ -208,4 +235,5 @@ if __name__ == "__main__":
 
     print("✅ Tekstbericht verzonden")
     print("📁 Grafieken gegenereerd in ./graphs/")
+
 
