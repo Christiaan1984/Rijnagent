@@ -40,6 +40,7 @@ jobs:
         with:
           repository: Christiaan1984/rijnagent-media
           ref: main
+          token: ${{ secrets.MEDIA_TOKEN }}   # <-- PAT met write toegang
           path: media
 
       - name: Kopieer grafieken naar media-repo
