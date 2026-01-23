@@ -7,8 +7,6 @@ on:
     - cron: "*/7 * * * *"   # TEST: elke 7 minuten (nieuw schema)
   workflow_dispatch:
 
-  
-
 jobs:
   run-agent:
     runs-on: ubuntu-latest
