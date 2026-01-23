@@ -3,19 +3,27 @@ name: Rijn Waterstanden Agent
 
 on:
   schedule:
-    - cron: "0 6-20 * * *"   # elk uur van 06:00 t/m 20:00
+    - cron: "0 6-20 * * *"   # elk uur 06:00 t/m 20:00 (UTC!)
   workflow_dispatch:
 
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-
     steps:
       - name: Repo ophalen
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Toon huidige directory en bestanden
+        run: |
+          pwd
+          ls -la
+          echo "---- .github ----"
+          ls -la .github || true
+          echo "---- scripts ----"
+          ls -la scripts || true
 
       - name: Python installeren
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
