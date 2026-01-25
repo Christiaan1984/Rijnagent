@@ -1,13 +1,11 @@
 
-name: Rijn Waterstanden Agent
-
 on:
   schedule:
     # GitHub cron = UTC
-    # NL wintertijd (CET = UTC+1): 06:00–20:00 NL => 05–19 UTC
-    - cron: "0 5-19 * * *"
-    # NL zomertijd (CEST = UTC+2): 06:00–20:00 NL => 04–18 UTC
-    - cron: "0 4-18 * * *"
+    # 07,09,11,13,15,17 NL -> CET (UTC+1): 06,08,10,12,14,16 UTC
+    - cron: "0 6,8,10,12,14,16,18 * * *"
+    # 07,09,11,13,15,17 NL -> CEST (UTC+2): 05,07,09,11,13,15 UTC
+    - cron: "0 5,7,9,11,13,15,16 * * *"
   workflow_dispatch:
 
 jobs:
