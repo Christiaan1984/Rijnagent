@@ -1,11 +1,8 @@
 
 on:
   schedule:
-    # GitHub cron = UTC
-    # 07,09,11,13,15,17 NL -> CET (UTC+1): 06,08,10,12,14,16 UTC
-    - cron: "0 6,8,10,12,14,16,18 * * *"
-    # 07,09,11,13,15,17 NL -> CEST (UTC+2): 05,07,09,11,13,15 UTC
-    - cron: "0 5,7,9,11,13,15,16 * * *"
+    # schedule:
+    #   - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:
