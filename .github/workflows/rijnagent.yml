@@ -2,10 +2,9 @@
 name: Rijnagent – Telegram
 
 on:
-  # Draai elk uur (we skippen buiten het venster met een tijd-check)
   schedule:
-    - cron: "0 * * * *"   # <-- GitHub Actions cron is altijd in UTC
-  workflow_dispatch:       # Handmatig starten blijft mogelijk
+    - cron: "0 * * * *"   # elk uur in UTC; we skippen buiten 06–19 lokale tijd
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,12 +17,9 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      # Telegram secrets uit GitHub → Settings → Secrets and variables → Actions
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      # Optioneel: je bestaande setting voor hulplijn
       LOW_LINE_CM: "200"
-      # Matplotlib headless backend
       MPLBACKEND: Agg
 
     steps:
@@ -35,7 +31,7 @@ jobs:
         shell: bash
         run: |
           HOUR=$(TZ=Europe/Amsterdam date +%H)
-          echo "Lokale (Europe/Amsterdam) tijd - uur: $HOUR"
+          echo "Lokale (Europe/Amsterdam) uur: $HOUR"
           if [ "$HOUR" -ge 6 ] && [ "$HOUR" -le 19 ]; then
             echo "run=true"  >> "$GITHUB_OUTPUT"
           else
@@ -44,14 +40,13 @@ jobs:
 
       - name: Skip buiten venster
         if: steps.window.outputs.run == 'false'
-        run: echo "⏭️ Buiten 06:00–19:00 (Europe/Amsterdam). Workflow slaat run over."
+        run: echo "⏭️ Buiten 06:00–19:00 (Europe/Amsterdam). Run wordt overgeslagen."
 
       - name: Python 3.11 installeren
         if: steps.window.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Dependencies installeren
         if: steps.window.outputs.run == 'true'
@@ -71,6 +66,5 @@ jobs:
       - name: Rijnagent draaien (Telegram)
         if: steps.window.outputs.run == 'true'
         run: |
-          # VERVANG het pad hieronder door de bestandsnaam van jouw script
-          # Bijvoorbeeld: python rijnagent.py
+          # PAS DIT AAN als jouw script anders heet of in een submap staat:
           python rijnagent.py
