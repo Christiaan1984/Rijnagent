@@ -246,4 +246,4 @@ if __name__ == "__main__":
     #         print(f"📸 Foto verstuurd: {fname}")
     #     except Exception as e:
     #         print(f"[ERROR] send_photo {station}: {e}")
-``
+
