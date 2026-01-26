@@ -1,8 +1,8 @@
 
 # -*- coding: utf-8 -*-
 """
-Rijnagent – WhatsApp-bericht + PNG-grafieken (48 uur) per station.
-- WhatsApp tekst via Twilio (SID/AUTH uit omgevingsvariabelen)
+Rijnagent – Telegram-bericht + PNG-grafieken (48 uur) per station.
+- Telegram tekst via Bot API (token/chat_id uit omgevingsvariabelen)
 - Historische data (48 uur) via PEGELONLINE:
     /stations/{UUID}/W/measurements.json?start=P2D
 - Grafieken per station in ./graphs/
@@ -10,11 +10,11 @@ Rijnagent – WhatsApp-bericht + PNG-grafieken (48 uur) per station.
 
 Opzet:
 - Dit script verstuurt ALLEEN het tekstbericht.
-- De workflow stuurt de grafieken als media-berichten (1 per bericht).
+- (Optioneel) kun je hieronder ook de grafieken als foto meesturen.
 
 Benodigde ENV (GitHub Secrets/locaal):
-- TWILIO_SID
-- TWILIO_AUTH
+- TELEGRAM_BOT_TOKEN
+- TELEGRAM_CHAT_ID
 Optioneel:
 - LOW_LINE_CM (default 200)
 """
@@ -22,17 +22,13 @@ Optioneel:
 import os
 import requests
 import matplotlib.pyplot as plt
-from datetime import datetime, timezone
-from twilio.rest import Client
+from datetime import datetime
 
 # ---------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------
-TWILIO_SID = os.getenv("TWILIO_SID", "").strip()
-TWILIO_AUTH = os.getenv("TWILIO_AUTH", "").strip()
-
-TWILIO_WHATSAPP = "whatsapp:+14155238886"     # Twilio Sandbox
-YOUR_WHATSAPP   = "whatsapp:+31646260683"     # Jouw nummer
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()   # bv. 8035571586 (string ok)
 
 # PEGELONLINE v2 (officiële WSV API)
 BASE = "https://www.wasserstaende.de/webservices/rest-api/v2"
@@ -51,14 +47,37 @@ GRAPH_DIR = "graphs"
 LOW_LINE  = int(os.getenv("LOW_LINE_CM",  "200"))  # 200 cm
 
 # ---------------------------------------------------------
-# TWILIO
+# TELEGRAM
 # ---------------------------------------------------------
-def send_whatsapp_text(text: str):
-    """Verstuur 1 WhatsApp-tekstbericht via Twilio."""
-    if not TWILIO_SID or not TWILIO_AUTH:
-        raise RuntimeError("TWILIO_SID/TWILIO_AUTH ontbreken (Secrets/Env).")
-    client = Client(TWILIO_SID, TWILIO_AUTH)
-    client.messages.create(body=text, from_=TWILIO_WHATSAPP, to=YOUR_WHATSAPP)
+def tg_send_text(text: str, parse_mode: str = "Markdown"):
+    """Verstuur 1 Telegram-tekstbericht naar TELEGRAM_CHAT_ID."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID ontbreken (Secrets/Env).")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+    r = requests.post(url, json=payload, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def tg_send_photo(filepath: str, caption: str = None, parse_mode: str = "Markdown"):
+    """(Optioneel) Verstuur een lokale PNG/JPG als foto (met optionele caption)."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID ontbreken (Secrets/Env).")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    with open(filepath, "rb") as f:
+        files = {"photo": f}
+        data = {"chat_id": TELEGRAM_CHAT_ID}
+        if caption:
+            data["caption"] = caption
+            data["parse_mode"] = parse_mode
+        r = requests.post(url, data=data, files=files, timeout=60)
+    r.raise_for_status()
+    return r.json()
 
 # ---------------------------------------------------------
 # UTIL
@@ -213,7 +232,18 @@ if __name__ == "__main__":
             message_lines.append(f"*{station}*: fout bij ophalen data")
             print(f"[ERROR] {station}: {e}")
 
-    # WhatsApp-tekst sturen (grafieken stuurt de workflow als media)
-    send_whatsapp_text("\n".join(message_lines))
-    print("✅ Tekstbericht verzonden")
+    # Telegram-tekst sturen (grafieken kun je optioneel erna sturen)
+    tg_send_text("\n".join(message_lines))
+    print("✅ Telegram tekstbericht verzonden")
     print("📁 Grafieken gegenereerd in ./graphs/")
+
+    # (OPTIONEEL) Ook de grafieken meesturen, per station:
+    # for station in STATIONS.keys():
+    #     fname = f"{GRAPH_DIR}/{safe_station_filename(station)}_48u.png"
+    #     try:
+    #         caption = f"Rijn – {station} – afgelopen 48 uur"
+    #         tg_send_photo(fname, caption=caption)
+    #         print(f"📸 Foto verstuurd: {fname}")
+    #     except Exception as e:
+    #         print(f"[ERROR] send_photo {station}: {e}")
+``
