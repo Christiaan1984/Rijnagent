@@ -3,7 +3,7 @@ name: Rijnagent – Telegram
 
 on:
   schedule:
-    - cron: "0 * * * *"   # elk uur in UTC; we skippen buiten 06–19 lokale tijd
+    - cron: "0 * * * *"   # elke uur (UTC); we checken lokaal 06–19 en skippen buiten venster
   workflow_dispatch:
 
 permissions:
@@ -26,6 +26,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Skip retries: alleen Attempt #1 mag verder
+      - name: Skip bij retry attempts
+        if: ${{ github.run_attempt > 1 }}
+        run: echo "⏭️ Retry attempt gedetecteerd; notificaties overslaan." && exit 0
+
+      # Lokaal tijdvenster (Europe/Amsterdam) 06–19
       - name: Bepaal lokale tijd (Europe/Amsterdam) en venster 06–19
         id: window
         shell: bash
@@ -41,6 +47,28 @@ jobs:
       - name: Skip buiten venster
         if: steps.window.outputs.run == 'false'
         run: echo "⏭️ Buiten 06:00–19:00 (Europe/Amsterdam). Run wordt overgeslagen."
+
+      # Hourly lock: laat maar 1 run per uur door (zelfs bij dubbele schedules)
+      - name: Hourly lock bepalen
+        if: steps.window.outputs.run == 'true'
+        id: lock
+        shell: bash
+        run: |
+          # Unieke sleutel per uur (UTC-uur is ok, we willen slechts 1 per uur)
+          KEY="rijnagent-lock-$(date -u +%Y%m%d%H)"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Hourly lock zetten/valideren
+        if: steps.window.outputs.run == 'true'
+        uses: actions/cache@v4
+        id: cachelock
+        with:
+          path: .rijnagent_lock
+          key: ${{ steps.lock.outputs.key }}
+
+      - name: Skip omdat lock al bestaat (er draait al een run dit uur)
+        if: steps.window.outputs.run == 'true' && steps.cachelock.outputs.cache-hit == 'true'
+        run: echo "⏭️ Lock aanwezig voor dit uur; deze instance slaat sturen over." && exit 0
 
       - name: Python 3.11 installeren
         if: steps.window.outputs.run == 'true'
@@ -66,5 +94,5 @@ jobs:
       - name: Rijnagent draaien (Telegram)
         if: steps.window.outputs.run == 'true'
         run: |
-          # PAS DIT AAN als jouw script anders heet of in een submap staat:
+          # PAS DIT AAN als je script anders heet of in submap staat:
           python rijnagent.py
