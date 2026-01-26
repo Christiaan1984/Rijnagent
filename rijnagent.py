@@ -237,14 +237,22 @@ if __name__ == "__main__":
     print("✅ Telegram tekstbericht verzonden")
     print("📁 Grafieken gegenereerd in ./graphs/")
 
-    # (OPTIONEEL) Ook de grafieken meesturen, per station:
-     for station in STATIONS.keys():
-         fname = f"{GRAPH_DIR}/{safe_station_filename(station)}_48u.png"
-         try:
-             caption = f"Rijn – {station} – afgelopen 48 uur"
-             tg_send_photo(fname, caption=caption)
-             print(f"📸 Foto verstuurd: {fname}")
-         except Exception as e:
-             print(f"[ERROR] send_photo {station}: {e}")
+ 
+# Telegram-tekst sturen (grafieken kun je optioneel erna sturen)
+tg_send_text("\n".join(message_lines))
+print("✅ Telegram tekstbericht verzonden")
+print("📁 Grafieken gegenereerd in ./graphs/")
+
+# Ook de grafieken meesturen, per station:
+for station in STATIONS.keys():
+    fname = f"{GRAPH_DIR}/{safe_station_filename(station)}_48u.png"
+    try:
+        caption = f"Rijn – {station} – afgelopen 48 uur"
+        tg_send_photo(fname, caption=caption)
+        print(f"📸 Foto verstuurd: {fname}")
+    except Exception as e:
+        print(f"[ERROR] send_photo {station}: {e}")
+
+
 
 
