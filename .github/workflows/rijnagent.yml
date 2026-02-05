@@ -1,16 +1,18 @@
-
 name: Rijnagent – Telegram
 
 on:
   schedule:
-    - cron: "0 * * * *"   # elke uur (UTC); we checken lokaal 06–19 en skippen buiten venster
+    # Draai elk uur op xx:05 (UTC) om randminute-duplicaties te vermijden
+    - cron: "5 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Concurrency: voorkom overlappende runs van deze workflow/branch.
+# In combinatie met de "laatste-run-wint" check (GitHub API) voorkomt dit dubbele berichten.
 concurrency:
-  group: rijnagent
+  group: rijnagent-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -46,38 +48,84 @@ jobs:
 
       - name: Skip buiten venster
         if: steps.window.outputs.run == 'false'
-        run: echo "⏭️ Buiten 06:00–19:00 (Europe/Amsterdam). Run wordt overgeslagen."
+        run: echo "⏭️ Buiten 06:00–19:00 (Europe/Amsterdam). Run wordt overgeslagen." && exit 0
 
-      # Hourly lock: laat maar 1 run per uur door (zelfs bij dubbele schedules)
-      - name: Hourly lock bepalen
+      # Installeer hulpmiddelen (jq) voor API-gestuurde deduplicatie
+      - name: Install jq
         if: steps.window.outputs.run == 'true'
-        id: lock
-        shell: bash
         run: |
-          # Unieke sleutel per uur (UTC-uur is ok, we willen slechts 1 per uur)
-          KEY="rijnagent-lock-$(date -u +%Y%m%d%H)"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
-      - name: Hourly lock zetten/valideren
+      # Deduplicatie: laat alleen de LAATSTE run binnen hetzelfde UTC-uur doorgaan
+      # We vergelijken alle runs van deze workflow/branch in het huidige UTC-uur en kiezen de hoogste run_id.
+      - name: Laatste-run-wint (API-check)
         if: steps.window.outputs.run == 'true'
-        uses: actions/cache@v4
-        id: cachelock
-        with:
-          path: .rijnagent_lock
-          key: ${{ steps.lock.outputs.key }}
+        id: lastruncheck
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          BRANCH: ${{ github.ref_name }}
+          WORKFLOW_FILE: ${{ github.workflow_ref }}  # bevat <owner>/<repo>/<path>@<ref>
+        run: |
+          # Bepaal huidige UTC-uur venster
+          START_HOUR="$(date -u -d '0 hour' +%Y-%m-%dT%H:00:00Z)"
+          END_HOUR="$(date -u -d '0 hour' +%Y-%m-%dT%H:59:59Z)"
+          echo "UTC uur-venster: $START_HOUR .. $END_HOUR"
 
-      - name: Skip omdat lock al bestaat (er draait al een run dit uur)
-        if: steps.window.outputs.run == 'true' && steps.cachelock.outputs.cache-hit == 'true'
-        run: echo "⏭️ Lock aanwezig voor dit uur; deze instance slaat sturen over." && exit 0
+          # Extract workflow filename uit workflow_ref (vorm: owner/repo/.github/workflows/file.yml@ref)
+          WF_FILE="$(echo "$WORKFLOW_FILE" | awk -F'[@:]' '{print $2}')"
+          # Fallback: als parsing mislukt, laat dan de huidige run doorgaan (fail-open is veiliger dan dubbel skippen)
+          if [ -z "$WF_FILE" ]; then
+            echo "WARN: kon workflow-bestand niet bepalen; sla dedupe niet toe."
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Workflow-bestand: $WF_FILE"
+
+          # Vraag workflow runs op (per workflow-bestand, branch), gefilterd op created_at binnen dit uur
+          # Let op: GITHUB_TOKEN heeft voldoende rechten voor deze API.
+          API="https://api.github.com/repos/$REPO/actions/workflows/$(basename "$WF_FILE")/runs?branch=$BRANCH&event=schedule&per_page=50"
+          echo "Query: $API"
+          RESP="$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "$API")"
+
+          # Filter runs in huidig UTC-uur
+          RUNS_IN_HOUR="$(echo "$RESP" | jq --arg START "$START_HOUR" --arg END "$END_HOUR" '
+            .workflow_runs
+            | map(select(.created_at >= $START and .created_at <= $END))
+            | map({id: .id, created_at: .created_at})
+          ')"
+
+          echo "Runs dit uur: $RUNS_IN_HOUR"
+
+          # Bepaal hoogste run_id in dit uur
+          MAX_ID="$(echo "$RUNS_IN_HOUR" | jq '[.[].id] | max // 0')"
+          if [ -z "$MAX_ID" ] || [ "$MAX_ID" = "null" ]; then
+            MAX_ID=0
+          fi
+          echo "Max run_id dit uur: $MAX_ID  | Huidige: $RUN_ID"
+
+          if [ "$MAX_ID" -eq 0 ]; then
+            # Geen andere runs gevonden → ga door
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          elif [ "$RUN_ID" -lt "$MAX_ID" ]; then
+            echo "⏭️ Een nieuwere run ($MAX_ID) bestaat in dit uur; deze run slaat versturen over."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            echo "✅ Dit is de nieuwste run in dit uur; ga door."
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Python 3.11 installeren
-        if: steps.window.outputs.run == 'true'
+        if: steps.window.outputs.run == 'true' && steps.lastruncheck.outputs.go == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Dependencies installeren
-        if: steps.window.outputs.run == 'true'
+        if: steps.window.outputs.run == 'true' && steps.lastruncheck.outputs.go == 'true'
         run: |
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
@@ -86,13 +134,13 @@ jobs:
           fi
 
       - name: Secrets valideren
-        if: steps.window.outputs.run == 'true'
+        if: steps.window.outputs.run == 'true' && steps.lastruncheck.outputs.go == 'true'
         run: |
           test -n "$TELEGRAM_BOT_TOKEN" || { echo "❌ Missing TELEGRAM_BOT_TOKEN"; exit 1; }
           test -n "$TELEGRAM_CHAT_ID"   || { echo "❌ Missing TELEGRAM_CHAT_ID"; exit 1; }
 
       - name: Rijnagent draaien (Telegram)
-        if: steps.window.outputs.run == 'true'
+        if: steps.window.outputs.run == 'true' && steps.lastruncheck.outputs.go == 'true'
         run: |
           # PAS DIT AAN als je script anders heet of in submap staat:
           python rijnagent.py
