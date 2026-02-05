@@ -2,142 +2,68 @@ name: Rijnagent – Telegram
 
 on:
   schedule:
-    # Draai elk uur op xx:05 (UTC) om randminute-duplicaties te vermijden
+    # Draai elk uur om xx:05 (UTC)
     - cron: "5 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Concurrency: voorkom overlappende runs van deze workflow/branch.
-# In combinatie met de "laatste-run-wint" check (GitHub API) voorkomt dit dubbele berichten.
-concurrency:
-  group: rijnagent-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   run:
     runs-on: ubuntu-latest
+
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
       SEND_PHOTOS: "true"
       LOW_LINE_CM: "200"
       MPLBACKEND: Agg
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Skip retries: alleen Attempt #1 mag verder
-      - name: Skip bij retry attempts
+      # Skip retries (soms doet GitHub zelf een retry bij network-glitch)
+      - name: Skip retry attempts
         if: ${{ github.run_attempt > 1 }}
-        run: echo "⏭️ Retry attempt gedetecteerd; notificaties overslaan." && exit 0
+        run: |
+          echo "⏭️ Retry attempt gedetecteerd — run overslaan."
+          exit 0
 
-      # Lokaal tijdvenster (Europe/Amsterdam) 06–19
-      - name: Bepaal lokale tijd (Europe/Amsterdam) en venster 06–19
+      # Tijdvenster (Europe/Amsterdam) 06–19
+      - name: Tijdvenster controle
         id: window
-        shell: bash
         run: |
           HOUR=$(TZ=Europe/Amsterdam date +%H)
-          echo "Lokale (Europe/Amsterdam) uur: $HOUR"
+          echo "Huidig uur (Amsterdam): $HOUR"
           if [ "$HOUR" -ge 6 ] && [ "$HOUR" -le 19 ]; then
-            echo "run=true"  >> "$GITHUB_OUTPUT"
+            echo "run=true" >> $GITHUB_OUTPUT
           else
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "run=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Skip buiten venster
         if: steps.window.outputs.run == 'false'
-        run: echo "⏭️ Buiten 06:00–19:00 (Europe/Amsterdam). Run wordt overgeslagen." && exit 0
-
-      # Installeer hulpmiddelen (jq) voor API-gestuurde deduplicatie
-      - name: Install jq
-        if: steps.window.outputs.run == 'true'
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
+          echo "⏭️ Buiten 06:00–19:00 — run overslaan."
+          exit 0
 
-      # Deduplicatie: laat alleen de LAATSTE run binnen hetzelfde UTC-uur doorgaan
-      - name: Laatste-run-wint (API-check)
-        if: steps.window.outputs.run == 'true'
-        id: lastruncheck
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          BRANCH: ${{ github.ref_name }}
-          WF_REF: ${{ github.workflow_ref }}  # bv: owner/repo/.github/workflows/rijnagent.yml@refs/heads/main
-        run: |
-          set -euo pipefail
-
-          START_HOUR="$(date -u -d '0 hour' +%Y-%m-%dT%H:00:00Z)"
-          END_HOUR="$(date -u -d '0 hour' +%Y-%m-%dT%H:59:59Z)"
-          echo "UTC uur-venster: $START_HOUR .. $END_HOUR"
-
-          echo "WF_REF: $WF_REF"
-          TMP="${WF_REF#*/*/}"      # strip owner/repo/
-          WF_PATH="${TMP%@*}"       # strip @ref
-          WF_BASE="$(basename "$WF_PATH")"
-
-          if [ -z "$WF_BASE" ] || [[ "$WF_BASE" != *.yml && "$WF_BASE" != *.yaml ]]; then
-            echo "WARN: Kon workflow-bestand niet betrouwbaar bepalen uit: $WF_REF"
-            echo "go=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Workflow-bestand: $WF_BASE"
-
-          API="https://api.github.com/repos/$REPO/actions/workflows/$WF_BASE/runs?branch=$BRANCH&event=schedule&per_page=50"
-          echo "Query: $API"
-          RESP="$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "$API")"
-
-          RUNS_IN_HOUR="$(echo "$RESP" | jq -c --arg START "$START_HOUR" --arg END "$END_HOUR" '
-            (.workflow_runs // [])
-            | map(select(.created_at >= $START and .created_at <= $END))
-            | map({id, created_at})
-          ')"
-          echo "Runs dit uur: $RUNS_IN_HOUR"
-
-          MAX_ID="$(echo "$RUNS_IN_HOUR" | jq -r '([.[].id] | max) // 0')"
-          if [ -z "${MAX_ID:-}" ] || [ "$MAX_ID" = "null" ]; then
-            MAX_ID=0
-          fi
-          echo "Max run_id dit uur: $MAX_ID  | Huidige: $RUN_ID"
-
-          if [ "$MAX_ID" -eq 0 ]; then
-            echo "✅ Geen andere runs gevonden dit uur; ga door."
-            echo "go=true" >> "$GITHUB_OUTPUT"
-          elif [ "$RUN_ID" -lt "$MAX_ID" ]; then
-            echo "⏭️ Een nieuwere run ($MAX_ID) bestaat in dit uur; deze run slaat versturen over."
-            echo "go=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          else
-            echo "✅ Dit is de nieuwste run in dit uur; ga door."
-            echo "go=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Python 3.11 installeren
-        if: steps.window.outputs.run == 'true' && steps.lastruncheck.outputs.go == 'true'
+      # Python installeren
+      - name: Install Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Dependencies installeren
-        if: steps.window.outputs.run == 'true' && steps.lastruncheck.outputs.go == 'true'
+      - name: Install dependencies
         run: |
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install requests matplotlib
-          fi
+          pip install requests matplotlib numpy
 
-      - name: Secrets valideren
-        if: steps.window.outputs.run == 'true' && steps.lastruncheck.outputs.go == 'true'
+      - name: Validate secrets
         run: |
-          test -n "$TELEGRAM_BOT_TOKEN" || { echo "❌ Missing TELEGRAM_BOT_TOKEN"; exit 1; }
-          test -n "$TELEGRAM_CHAT_ID"   || { echo "❌ Missing TELEGRAM_CHAT_ID"; exit 1; }
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "❌ Missing TELEGRAM_BOT_TOKEN"; exit 1; fi
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then echo "❌ Missing TELEGRAM_CHAT_ID"; exit 1; fi
 
-      - name: Rijnagent draaien (Telegram)
-        if: steps.window.outputs.run == 'true' && steps.lastruncheck.outputs.go == 'true'
+      - name: Run Rijnagent script
         run: |
           python rijnagent.py
