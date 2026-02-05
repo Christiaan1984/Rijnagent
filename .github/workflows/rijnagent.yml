@@ -58,56 +58,53 @@ jobs:
           sudo apt-get install -y jq
 
       # Deduplicatie: laat alleen de LAATSTE run binnen hetzelfde UTC-uur doorgaan
-      # We vergelijken alle runs van deze workflow/branch in het huidige UTC-uur en kiezen de hoogste run_id.
       - name: Laatste-run-wint (API-check)
         if: steps.window.outputs.run == 'true'
         id: lastruncheck
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           BRANCH: ${{ github.ref_name }}
-          WORKFLOW_FILE: ${{ github.workflow_ref }}  # bevat <owner>/<repo>/<path>@<ref>
+          WF_REF: ${{ github.workflow_ref }}  # bv: owner/repo/.github/workflows/rijnagent.yml@refs/heads/main
         run: |
-          # Bepaal huidige UTC-uur venster
+          set -euo pipefail
+
           START_HOUR="$(date -u -d '0 hour' +%Y-%m-%dT%H:00:00Z)"
           END_HOUR="$(date -u -d '0 hour' +%Y-%m-%dT%H:59:59Z)"
           echo "UTC uur-venster: $START_HOUR .. $END_HOUR"
 
-          # Extract workflow filename uit workflow_ref (vorm: owner/repo/.github/workflows/file.yml@ref)
-          WF_FILE="$(echo "$WORKFLOW_FILE" | awk -F'[@:]' '{print $2}')"
-          # Fallback: als parsing mislukt, laat dan de huidige run doorgaan (fail-open is veiliger dan dubbel skippen)
-          if [ -z "$WF_FILE" ]; then
-            echo "WARN: kon workflow-bestand niet bepalen; sla dedupe niet toe."
+          echo "WF_REF: $WF_REF"
+          TMP="${WF_REF#*/*/}"      # strip owner/repo/
+          WF_PATH="${TMP%@*}"       # strip @ref
+          WF_BASE="$(basename "$WF_PATH")"
+
+          if [ -z "$WF_BASE" ] || [[ "$WF_BASE" != *.yml && "$WF_BASE" != *.yaml ]]; then
+            echo "WARN: Kon workflow-bestand niet betrouwbaar bepalen uit: $WF_REF"
             echo "go=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Workflow-bestand: $WF_FILE"
+          echo "Workflow-bestand: $WF_BASE"
 
-          # Vraag workflow runs op (per workflow-bestand, branch), gefilterd op created_at binnen dit uur
-          # Let op: GITHUB_TOKEN heeft voldoende rechten voor deze API.
-          API="https://api.github.com/repos/$REPO/actions/workflows/$(basename "$WF_FILE")/runs?branch=$BRANCH&event=schedule&per_page=50"
+          API="https://api.github.com/repos/$REPO/actions/workflows/$WF_BASE/runs?branch=$BRANCH&event=schedule&per_page=50"
           echo "Query: $API"
           RESP="$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "$API")"
 
-          # Filter runs in huidig UTC-uur
-          RUNS_IN_HOUR="$(echo "$RESP" | jq --arg START "$START_HOUR" --arg END "$END_HOUR" '
-            .workflow_runs
+          RUNS_IN_HOUR="$(echo "$RESP" | jq -c --arg START "$START_HOUR" --arg END "$END_HOUR" '
+            (.workflow_runs // [])
             | map(select(.created_at >= $START and .created_at <= $END))
-            | map({id: .id, created_at: .created_at})
+            | map({id, created_at})
           ')"
-
           echo "Runs dit uur: $RUNS_IN_HOUR"
 
-          # Bepaal hoogste run_id in dit uur
-          MAX_ID="$(echo "$RUNS_IN_HOUR" | jq '[.[].id] | max // 0')"
-          if [ -z "$MAX_ID" ] || [ "$MAX_ID" = "null" ]; then
+          MAX_ID="$(echo "$RUNS_IN_HOUR" | jq -r '([.[].id] | max) // 0')"
+          if [ -z "${MAX_ID:-}" ] || [ "$MAX_ID" = "null" ]; then
             MAX_ID=0
           fi
           echo "Max run_id dit uur: $MAX_ID  | Huidige: $RUN_ID"
 
           if [ "$MAX_ID" -eq 0 ]; then
-            # Geen andere runs gevonden → ga door
+            echo "✅ Geen andere runs gevonden dit uur; ga door."
             echo "go=true" >> "$GITHUB_OUTPUT"
           elif [ "$RUN_ID" -lt "$MAX_ID" ]; then
             echo "⏭️ Een nieuwere run ($MAX_ID) bestaat in dit uur; deze run slaat versturen over."
@@ -142,5 +139,4 @@ jobs:
       - name: Rijnagent draaien (Telegram)
         if: steps.window.outputs.run == 'true' && steps.lastruncheck.outputs.go == 'true'
         run: |
-          # PAS DIT AAN als je script anders heet of in submap staat:
           python rijnagent.py
