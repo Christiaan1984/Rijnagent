@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 Rijnagent – Telegram-bericht + PNG-grafieken (48 uur) per station.
@@ -8,15 +7,12 @@ Rijnagent – Telegram-bericht + PNG-grafieken (48 uur) per station.
 - Grafieken per station in ./graphs/
 - Hulplijnen: alleen 200 cm (5 m lijn is verwijderd)
 
-Opzet:
-- Dit script verstuurt ALLEEN het tekstbericht.
-- (Optioneel) kun je hieronder ook de grafieken als foto meesturen.
-
-Benodigde ENV (GitHub Secrets/locaal):
+Benodigde ENV:
 - TELEGRAM_BOT_TOKEN
 - TELEGRAM_CHAT_ID
 Optioneel:
 - LOW_LINE_CM (default 200)
+- SEND_PHOTOS (default false)  -> als 'true/1/yes', dan ook de grafieken meesturen
 """
 
 import os
@@ -28,7 +24,8 @@ from datetime import datetime
 # CONFIG
 # ---------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()   # bv. 8035571586 (string ok)
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()  # string prima
+SEND_PHOTOS        = os.getenv("SEND_PHOTOS", "false").strip().lower() in ("1", "true", "yes")
 
 # PEGELONLINE v2 (officiële WSV API)
 BASE = "https://www.wasserstaende.de/webservices/rest-api/v2"
@@ -43,7 +40,7 @@ STATIONS = {
 HOURS_BACK = 48
 GRAPH_DIR = "graphs"
 
-# Hulplijn (cm) – 5 m lijn verwijderd
+# Hulplijn (cm)
 LOW_LINE  = int(os.getenv("LOW_LINE_CM",  "200"))  # 200 cm
 
 # ---------------------------------------------------------
@@ -64,10 +61,12 @@ def tg_send_text(text: str, parse_mode: str = "Markdown"):
     r.raise_for_status()
     return r.json()
 
-def tg_send_photo(filepath: str, caption: str = None, parse_mode: str = "Markdown"):
+def tg_send_photo(filepath: str, caption: str | None = None, parse_mode: str = "Markdown"):
     """(Optioneel) Verstuur een lokale PNG/JPG als foto (met optionele caption)."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID ontbreken (Secrets/Env).")
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(filepath)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     with open(filepath, "rb") as f:
         files = {"photo": f}
@@ -85,7 +84,7 @@ def tg_send_photo(filepath: str, caption: str = None, parse_mode: str = "Markdow
 def ensure_graph_dir():
     """Zorg dat ./graphs/ bestaat."""
     if not os.path.exists(GRAPH_DIR):
-        os.makedirs(GRAPH_DIR)
+        os.makedirs(GRAPH_DIR, exist_ok=True)
 
 def safe_station_filename(name: str) -> str:
     """Veilige bestandsnaam (ASCII) op basis van station-naam."""
@@ -201,7 +200,7 @@ def make_graph(station: str, points, filepath: str):
 # ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
-if __name__ == "__main__":
+def main():
     ensure_graph_dir()
 
     now_str = datetime.now().strftime("%d-%m-%Y %H:%M")
@@ -221,7 +220,7 @@ if __name__ == "__main__":
             make_graph(station, history, fname)
 
             if current is not None:
-                message_lines.append(f"*{station}*: {current} cm")
+                message_lines.append(f"*{station}*: {int(current)} cm")
             else:
                 message_lines.append(f"*{station}*: geen actuele waarde")
 
@@ -232,27 +231,22 @@ if __name__ == "__main__":
             message_lines.append(f"*{station}*: fout bij ophalen data")
             print(f"[ERROR] {station}: {e}")
 
-    # Telegram-tekst sturen (grafieken kun je optioneel erna sturen)
+    # 1) Telegram-tekst sturen (één bericht)
     tg_send_text("\n".join(message_lines))
     print("✅ Telegram tekstbericht verzonden")
+
+    # 2) (Optioneel) ook grafieken meesturen – 1 foto per station
+    if SEND_PHOTOS:
+        for station in STATIONS.keys():
+            fname = f"{GRAPH_DIR}/{safe_station_filename(station)}_48u.png"
+            try:
+                caption = f"Rijn – {station} – afgelopen 48 uur"
+                tg_send_photo(fname, caption=caption)
+                print(f"📸 Foto verstuurd: {fname}")
+            except Exception as e:
+                print(f"[ERROR] send_photo {station}: {e}")
+
     print("📁 Grafieken gegenereerd in ./graphs/")
 
- 
-# Telegram-tekst sturen (grafieken kun je optioneel erna sturen)
-tg_send_text("\n".join(message_lines))
-print("✅ Telegram tekstbericht verzonden")
-print("📁 Grafieken gegenereerd in ./graphs/")
-
-# Ook de grafieken meesturen, per station:
-for station in STATIONS.keys():
-    fname = f"{GRAPH_DIR}/{safe_station_filename(station)}_48u.png"
-    try:
-        caption = f"Rijn – {station} – afgelopen 48 uur"
-        tg_send_photo(fname, caption=caption)
-        print(f"📸 Foto verstuurd: {fname}")
-    except Exception as e:
-        print(f"[ERROR] send_photo {station}: {e}")
-
-
-
-
+if __name__ == "__main__":
+    main()
